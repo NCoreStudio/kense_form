@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>解答フォーム</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Firebase v9 compat -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
+  <style>
+    .exam-header {
+      background: var(--primary);
+      color: #fff;
+      padding: 24px 20px 20px;
+      text-align: center;
+    }
+    .exam-header h1 { font-size: 1.2rem; margin-bottom: 4px; }
+    .exam-header p  { font-size: 0.83rem; opacity: 0.8; }
+
+    .progress-bar-wrap {
+      background: rgba(255,255,255,0.2);
+      border-radius: 100px;
+      height: 6px;
+      margin-top: 12px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: #fff;
+      border-radius: 100px;
+      transition: width 0.3s;
+      width: 0%;
+    }
+    .progress-label { font-size: 0.78rem; opacity: 0.85; margin-top: 5px; }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media(max-width:480px){ .info-grid{ grid-template-columns: 1fr; } }
+
+    .submit-area {
+      background: #fff;
+      border-top: 1px solid var(--border);
+      padding: 16px 20px;
+      position: sticky;
+      bottom: 0;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .submit-area .answered-count {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      flex: 1;
+    }
+
+    .success-screen {
+      display: none;
+      text-align: center;
+      padding: 60px 20px;
+    }
+    .success-icon { font-size: 3.5rem; margin-bottom: 16px; }
+
+    .closed-screen {
+      display: none;
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<!-- ローディング中 -->
+<div id="loading-screen" class="loading-wrap">
+  <div class="spinner"></div>
+  <p class="text-sm mt-8">テスト情報を読み込んでいます...</p>
+</div>
+
+<!-- テスト受付停止中 -->
+<div id="closed-screen" class="closed-screen">
+  <div style="font-size:3rem;margin-bottom:12px">🔒</div>
+  <h2 style="color:var(--text);margin-bottom:8px">現在このテストは受付停止中です</h2>
+  <p class="text-sm">管理者にお問い合わせください。</p>
+</div>
+
+<!-- メインフォーム -->
+<div id="main-screen" style="display:none">
+  <div class="exam-header">
+    <h1 id="exam-title">—</h1>
+    <p id="exam-meta">—</p>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="prog-bar"></div>
+    </div>
+    <div class="progress-label" id="prog-label">0 / 0 問 回答済み</div>
+  </div>
+
+  <div class="page-wrap" style="padding-top:24px;padding-bottom:80px">
+    <form id="exam-form">
+      <!-- 受験者情報 -->
+      <div class="card" style="margin-bottom:20px">
+        <div class="section-label" style="margin-bottom:16px">受験者情報</div>
+        <div class="info-grid">
+          <div class="field">
+            <label>氏名<span class="req">*</span></label>
+            <input type="text" id="inp-name" placeholder="例：山田 太郎" required>
+          </div>
+          <div class="field">
+            <label>企業名</label>
+            <input type="text" id="inp-company" placeholder="例：○○建設株式会社">
+          </div>
+          <div class="field">
+            <label>受験番号</label>
+            <input type="text" id="inp-sid" placeholder="例：2024-001">
+          </div>
+        </div>
+      </div>
+
+      <!-- 解答欄 -->
+      <div class="card">
+        <div class="section-label" style="margin-bottom:16px">解答欄</div>
+        <div class="answer-grid" id="answer-grid"></div>
+      </div>
+    </form>
+  </div>
+
+  <div class="submit-area">
+    <span class="answered-count" id="answered-count">0 / 0 問 回答済み</span>
+    <button type="button" class="btn btn-primary btn-lg" id="submit-btn" onclick="submitAnswers()">
+      解答を送信する
+    </button>
+  </div>
+</div>
+
+<!-- 送信完了 -->
+<div class="page-wrap">
+  <div id="success-screen" class="success-screen card">
+    <div class="success-icon">✅</div>
+    <h2 style="margin-bottom:8px">解答を送信しました</h2>
+    <p class="text-muted text-sm" id="success-name"></p>
+    <p class="text-muted text-sm mt-8">お疲れさまでした。</p>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const params  = new URLSearchParams(location.search);
+const examId  = params.get("id");
+let examData  = null;
+let totalQ    = 0;
+
+// ---- 初期化 ----
+if (!examId) {
+  showError("URLにテストIDが含まれていません。");
+} else {
+  loadExam();
+}
+
+async function loadExam() {
+  try {
+    const snap = await db.collection("exams").doc(examId).get();
+    if (!snap.exists) { showError("テストが見つかりません。URLを確認してください。"); return; }
+    examData = snap.data();
+
+    if (!examData.isActive) {
+      document.getElementById("loading-screen").style.display = "none";
+      document.getElementById("closed-screen").style.display = "block";
+      return;
+    }
+
+    totalQ = examData.questionCount || 72;
+    document.title = examData.title + " - 解答フォーム";
+    document.getElementById("exam-title").textContent = examData.title;
+    document.getElementById("exam-meta").textContent =
+      `全 ${totalQ} 問　／　選択肢 ${examData.choices || 5} つ`;
+
+    buildGrid();
+
+    document.getElementById("loading-screen").style.display = "none";
+    document.getElementById("main-screen").style.display = "block";
+    updateProgress();
+  } catch(e) {
+    showError("読み込みに失敗しました：" + e.message);
+  }
+}
+
+function buildGrid() {
+  const grid = document.getElementById("answer-grid");
+  const choices = examData.choices || 5;
+  for (let q = 1; q <= totalQ; q++) {
+    const row = document.createElement("div");
+    row.className = "answer-row";
+    row.dataset.q = q;
+
+    const qn = document.createElement("span");
+    qn.className = "q-num";
+    qn.textContent = `問 ${q}`;
+    row.appendChild(qn);
+
+    const cg = document.createElement("div");
+    cg.className = "choice-group";
+    for (let c = 1; c <= choices; c++) {
+      const id = `q${q}_c${c}`;
+      const radio = document.createElement("input");
+      radio.type = "radio"; radio.name = `q${q}`; radio.value = c; radio.id = id;
+      radio.addEventListener("change", () => {
+        row.classList.remove("unanswered");
+        updateProgress();
+      });
+      const lbl = document.createElement("label");
+      lbl.htmlFor = id; lbl.textContent = c;
+      cg.appendChild(radio); cg.appendChild(lbl);
+    }
+    row.appendChild(cg);
+    grid.appendChild(row);
+  }
+}
+
+function updateProgress() {
+  let answered = 0;
+  for (let q = 1; q <= totalQ; q++) {
+    if (document.querySelector(`input[name="q${q}"]:checked`)) answered++;
+  }
+  const pct = totalQ ? Math.round(answered / totalQ * 100) : 0;
+  document.getElementById("prog-bar").style.width = pct + "%";
+  document.getElementById("prog-label").textContent = `${answered} / ${totalQ} 問 回答済み`;
+  document.getElementById("answered-count").textContent = `${answered} / ${totalQ} 問 回答済み`;
+}
+
+async function submitAnswers() {
+  const name    = document.getElementById("inp-name").value.trim();
+  const company = document.getElementById("inp-company").value.trim();
+  const sid     = document.getElementById("inp-sid").value.trim();
+
+  if (!name) { showToast("氏名を入力してください"); return; }
+
+  // 未回答チェック
+  const unanswered = [];
+  const answers = {};
+  for (let q = 1; q <= totalQ; q++) {
+    const sel = document.querySelector(`input[name="q${q}"]:checked`);
+    const row = document.querySelector(`.answer-row[data-q="${q}"]`);
+    if (!sel) { unanswered.push(q); row.classList.add("unanswered"); }
+    else       { answers[q] = parseInt(sel.value); row.classList.remove("unanswered"); }
+  }
+  if (unanswered.length) {
+    showToast(`未回答があります：問 ${unanswered.slice(0,5).join("、")}${unanswered.length>5?"…":""}`);
+    document.querySelector(`.answer-row[data-q="${unanswered[0]}"]`)
+      .scrollIntoView({ behavior:"smooth", block:"center" });
+    return;
+  }
+
+  const btn = document.getElementById("submit-btn");
+  btn.disabled = true; btn.textContent = "送信中...";
+
+  // 自動採点
+  const key = examData.answerKey || {};
+  let correct = 0;
+  const results = {};
+  for (let q = 1; q <= totalQ; q++) {
+    const isOk = answers[q] === (key[q] || key[String(q)]);
+    if (isOk) correct++;
+    results[q] = { answer: answers[q], correct: isOk };
+  }
+  const score  = Math.round(correct / totalQ * 100);
+  const passed = score >= (examData.passingScore || 60);
+
+  const submission = {
+    examId,
+    examTitle: examData.title,
+    name, company, studentId: sid,
+    answers, results,
+    correct, total: totalQ, score, passed,
+    submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
+  };
+
+  try {
+    await db.collection("submissions").add(submission);
+    document.getElementById("main-screen").style.display = "none";
+    const sc = document.getElementById("success-screen");
+    sc.style.display = "block";
+    document.getElementById("success-name").textContent = `${name} さん`;
+  } catch(e) {
+    btn.disabled = false; btn.textContent = "解答を送信する";
+    showToast("送信に失敗しました：" + e.message);
+  }
+}
+
+function showError(msg) {
+  document.getElementById("loading-screen").innerHTML =
+    `<div style="text-align:center;padding:60px 20px;color:var(--danger)"><div style="font-size:2rem;margin-bottom:12px">⚠️</div><div>${msg}</div></div>`;
+}
+
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3200);
+}
+</script>
+</body>
+</html>
